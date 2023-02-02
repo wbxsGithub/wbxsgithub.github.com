@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  
+  
+  <title>clickhouse写入分布式表流程 | Hexo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+  <meta name="description" content="前言​	分布式表是ClickHouse非常重要的一部分，多用于数据的查询，但分布式表的写入流程对大家来讲可能不是很明确，下面对分布式表的写入流程进行分析。前面select的parser阶段和执行流程已经有大佬进行了分享，insert的解析大致与其相似，下面将略过解析流程直接从写入的核心部分接入。 DistributedBlockOutputStream123456789DistributedBlo">
+<meta property="og:type" content="article">
+<meta property="og:title" content="clickhouse写入分布式表流程">
+<meta property="og:url" content="http://example.com/2023/02/02/clickhouse%E5%86%99%E5%85%A5%E5%88%86%E5%B8%83%E5%BC%8F%E8%A1%A8%E6%B5%81%E7%A8%8B/index.html">
+<meta property="og:site_name" content="Hexo">
+<meta property="og:description" content="前言​	分布式表是ClickHouse非常重要的一部分，多用于数据的查询，但分布式表的写入流程对大家来讲可能不是很明确，下面对分布式表的写入流程进行分析。前面select的parser阶段和执行流程已经有大佬进行了分享，insert的解析大致与其相似，下面将略过解析流程直接从写入的核心部分接入。 DistributedBlockOutputStream123456789DistributedBlo">
+<meta property="og:locale" content="en_US">
+<meta property="article:published_time" content="2023-02-02T11:18:58.000Z">
+<meta property="article:modified_time" content="2023-02-02T11:24:40.309Z">
+<meta property="article:author" content="John Doe">
+<meta name="twitter:card" content="summary">
+  
+    <link rel="alternate" href="/atom.xml" title="Hexo" type="application/atom+xml">
+  
+  
+    <link rel="shortcut icon" href="/favicon.png">
+  
+  
+    
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/typeface-source-code-pro@0.0.71/index.min.css">
+
+  
+  
+<link rel="stylesheet" href="/css/style.css">
+
+  
+    
+<link rel="stylesheet" href="/fancybox/jquery.fancybox.min.css">
+
+  
+<meta name="generator" content="Hexo 6.3.0"></head>
+
+<body>
+  <div id="container">
+    <div id="wrap">
+      <header id="header">
+  <div id="banner"></div>
+  <div id="header-outer" class="outer">
+    <div id="header-title" class="inner">
+      <h1 id="logo-wrap">
+        <a href="/" id="logo">Hexo</a>
+      </h1>
+      
+    </div>
+    <div id="header-inner" class="inner">
+      <nav id="main-nav">
+        <a id="main-nav-toggle" class="nav-icon"></a>
+        
+          <a class="main-nav-link" href="/">Home</a>
+        
+          <a class="main-nav-link" href="/archives">Archives</a>
+        
+      </nav>
+      <nav id="sub-nav">
+        
+          <a id="nav-rss-link" class="nav-icon" href="/atom.xml" title="RSS Feed"></a>
+        
+        <a id="nav-search-btn" class="nav-icon" title="Search"></a>
+      </nav>
+      <div id="search-form-wrap">
+        <form action="//google.com/search" method="get" accept-charset="UTF-8" class="search-form"><input type="search" name="q" class="search-form-input" placeholder="Search"><button type="submit" class="search-form-submit">&#xF002;</button><input type="hidden" name="sitesearch" value="http://example.com"></form>
+      </div>
+    </div>
+  </div>
+</header>
+
+      <div class="outer">
+        <section id="main"><article id="post-clickhouse写入分布式表流程" class="h-entry article article-type-post" itemprop="blogPost" itemscope itemtype="https://schema.org/BlogPosting">
+  <div class="article-meta">
+    <a href="/2023/02/02/clickhouse%E5%86%99%E5%85%A5%E5%88%86%E5%B8%83%E5%BC%8F%E8%A1%A8%E6%B5%81%E7%A8%8B/" class="article-date">
+  <time class="dt-published" datetime="2023-02-02T11:18:58.000Z" itemprop="datePublished">2023-02-02</time>
+</a>
+    
+  </div>
+  <div class="article-inner">
+    
+    
+      <header class="article-header">
+        
+  
+    <h1 class="p-name article-title" itemprop="headline name">
+      clickhouse写入分布式表流程
+    </h1>
+  
+
+      </header>
+    
+    <div class="e-content article-entry" itemprop="articleBody">
+      
+        <h3 id="前言"><a href="#前言" class="headerlink" title="前言"></a>前言</h3><p>​	分布式表是ClickHouse非常重要的一部分，多用于数据的查询，但分布式表的写入流程对大家来讲可能不是很明确，下面对分布式表的写入流程进行分析。前面select的parser阶段和执行流程已经有大佬进行了分享，insert的解析大致与其相似，下面将略过解析流程直接从写入的核心部分接入。</p>
+<h3 id="DistributedBlockOutputStream"><a href="#DistributedBlockOutputStream" class="headerlink" title="DistributedBlockOutputStream"></a>DistributedBlockOutputStream</h3><figure class="highlight c++"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line"><span class="built_in">DistributedBlockOutputStream</span>(</span><br><span class="line">        ContextPtr context_,</span><br><span class="line">        StorageDistributed &amp; storage_,</span><br><span class="line">        <span class="type">const</span> StorageMetadataPtr &amp; metadata_snapshot_,</span><br><span class="line">        <span class="type">const</span> ASTPtr &amp; query_ast_,</span><br><span class="line">        <span class="type">const</span> ClusterPtr &amp; cluster_,</span><br><span class="line">        <span class="type">bool</span> insert_sync_,</span><br><span class="line">        UInt64 insert_timeout_,</span><br><span class="line">        StorageID main_table_);</span><br></pre></td></tr></table></figure>
+
+<p>从debug中可找到write的写入入口，这里就不贴图片了。</p>
+<p>1.异步写入和同步写入</p>
+<ul>
+<li>同步写入：数据直接写入实际的表中</li>
+<li>异步写入：数据先被写入本地文件系统，然后异步发送到远端节点</li>
+</ul>
+<figure class="highlight c++"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="type">void</span> <span class="title">DistributedBlockOutputStream::write</span><span class="params">(<span class="type">const</span> Block &amp; block)</span></span></span><br><span class="line"><span class="function"></span>&#123;</span><br><span class="line">		....</span><br><span class="line">    <span class="comment">//主要判断逻辑</span></span><br><span class="line">    <span class="keyword">if</span> (insert_sync)</span><br><span class="line">        <span class="built_in">writeSync</span>(ordinary_block);</span><br><span class="line">    <span class="keyword">else</span></span><br><span class="line">        <span class="built_in">writeAsync</span>(ordinary_block);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>是否同步写入由insert_sync决定，而insert_sync的值由配置中的insert_distributed_sync决定，默认为false，即异步写入。</p>
+<p>2.写入单shard还是所有shard</p>
+<p>目前大多的集群都是采用默认的异步写入方式，下面就异步写入。分析写入本地节点和远端节点的情况。</p>
+<figure class="highlight c++"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="type">void</span> <span class="title">DistributedBlockOutputStream::writeAsyncImpl</span><span class="params">(<span class="type">const</span> Block &amp; block, <span class="type">size_t</span> shard_id)</span></span></span><br><span class="line"><span class="function"></span>&#123;</span><br><span class="line">		...</span><br><span class="line">		<span class="keyword">if</span> (shard_info.<span class="built_in">hasInternalReplication</span>())  <span class="comment">//由 internal_replication 的设置决定</span></span><br><span class="line">		&#123;</span><br><span class="line">				<span class="keyword">if</span> (shard_info.<span class="built_in">isLocal</span>() &amp;&amp; settings.prefer_localhost_replica)</span><br><span class="line">						<span class="built_in">writeToLocal</span>(block, shard_info.<span class="built_in">getLocalNodeCount</span>());</span><br><span class="line">		&#125;</span><br><span class="line">		<span class="keyword">else</span></span><br><span class="line">		&#123;</span><br><span class="line">				<span class="keyword">if</span> (shard_info.<span class="built_in">isLocal</span>() &amp;&amp; settings.prefer_localhost_replica)</span><br><span class="line">            <span class="built_in">writeToLocal</span>(block, shard_info.<span class="built_in">getLocalNodeCount</span>());</span><br><span class="line">        std::vector&lt;std::string&gt; dir_names;</span><br><span class="line">        <span class="keyword">for</span> (<span class="type">const</span> <span class="keyword">auto</span> &amp; address : cluster-&gt;<span class="built_in">getShardsAddresses</span>()[shard_id])</span><br><span class="line">            <span class="keyword">if</span> (!address.is_local || !settings.prefer_localhost_replica)</span><br><span class="line">            			dir_names.<span class="built_in">push_back</span>(address.<span class="built_in">toFullString</span></span><br><span class="line">            			(settings.use_compact_format_in_distributed_parts_names));</span><br><span class="line">        <span class="keyword">if</span> (!dir_names.<span class="built_in">empty</span>())</span><br><span class="line">            <span class="built_in">writeToShard</span>(block, dir_names);</span><br><span class="line">		&#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>实际上，同步和异步的写入的主要方法都是<code>writeAsyncImpl</code> ，其中writeToLocal方法是相同的，指在插入的目标中包含本地节点时优先选择本地节点写入。其中shard_info.hasInternalReplication()的判断，由internal_replication决定，是写入一个节点还是写入所有的节点都写一次。</p>
+<p>3.写入分布式如何进行数据分发？</p>
+<p>在writeToShard方法中，通过注册Monitor目录监听（requireDirectoryMonitor）实现数据的分发。</p>
+<p>sharding_key的作用：通过sharding_key和设定的weight值来决定数据的写入策略。</p>
+<p>具体的：在writeAsync和writeAsyncImpl之间存在方法：writeSplitAsync。当指定了sharding_key并且shard个数大于1时，则对block进行拆分。</p>
+<p>将splitBlock分割的返回的splitted_blocks通过writeAsyncImpl方法写入。具体的写入方法writeToShard。</p>
+<figure class="highlight c++"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="type">void</span> <span class="title">DistributedBlockOutputStream::writeToShard</span><span class="params">(<span class="type">const</span> Block &amp; block, <span class="type">const</span> std::vector&lt;std::string&gt; &amp; dir_names)</span></span></span><br><span class="line"><span class="function"></span>&#123;</span><br><span class="line">    ...</span><br><span class="line">    &#123;</span><br><span class="line">        <span class="function"><span class="type">const</span> std::string <span class="title">path</span><span class="params">(disk_path + data_path + *it)</span></span>;</span><br><span class="line">        <span class="function"><span class="type">const</span> std::string <span class="title">tmp_path</span><span class="params">(path + <span class="string">&quot;/tmp/&quot;</span>)</span></span>;</span><br><span class="line">        fs::<span class="built_in">create_directory</span>(path);</span><br><span class="line">        fs::<span class="built_in">create_directory</span>(tmp_path);</span><br><span class="line">        <span class="function"><span class="type">const</span> std::string <span class="title">file_name</span><span class="params">(toString(storage.file_names_increment.get()) + <span class="string">&quot;.bin&quot;</span>)</span></span>;</span><br><span class="line">        first_file_tmp_path = tmp_path + file_name;</span><br><span class="line">        <span class="comment">/// Write batch to temporary location</span></span><br><span class="line">        &#123;</span><br><span class="line">            <span class="keyword">auto</span> tmp_dir_sync_guard = <span class="built_in">make_directory_sync_guard</span>(*it + <span class="string">&quot;/tmp/&quot;</span>);</span><br><span class="line"></span><br><span class="line">            WriteBufferFromFile out&#123;first_file_tmp_path&#125;;</span><br><span class="line">            CompressedWriteBuffer compress&#123;out, compression_codec&#125;;</span><br><span class="line">            NativeBlockOutputStream stream&#123;compress, DBMS_TCP_PROTOCOL_VERSION, block.<span class="built_in">cloneEmpty</span>()&#125;;</span><br><span class="line">            <span class="built_in">writeStringBinary</span>(...);</span><br><span class="line">            ...</span><br><span class="line">            stream.<span class="built_in">writePrefix</span>();</span><br><span class="line">            stream.<span class="built_in">write</span>(block);</span><br><span class="line">            stream.<span class="built_in">writeSuffix</span>();</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br><span class="line">  	<span class="comment">/// Make hardlinks</span></span><br><span class="line">    <span class="keyword">for</span> (; it != dir_names.<span class="built_in">end</span>(); ++it)</span><br><span class="line">    &#123;</span><br><span class="line">        <span class="function"><span class="type">const</span> std::string <span class="title">path</span><span class="params">(fs::path(disk_path) / (data_path + *it))</span></span>;</span><br><span class="line">        fs::<span class="built_in">create_directory</span>(path);</span><br><span class="line"></span><br><span class="line">        <span class="function"><span class="type">const</span> std::string <span class="title">block_file_path</span><span class="params">(fs::path(path) / (toString(storage.file_names_increment.get()) + <span class="string">&quot;.bin&quot;</span>))</span></span>;</span><br><span class="line">        <span class="built_in">createHardLink</span>(first_file_tmp_path, block_file_path);</span><br><span class="line">        <span class="keyword">auto</span> dir_sync_guard = <span class="built_in">make_directory_sync_guard</span>(*it);</span><br><span class="line">    &#125;</span><br><span class="line">    ...</span><br><span class="line">    storage.<span class="built_in">requireDirectoryMonitor</span>(disk, dir_name, <span class="comment">/* startup= */</span> <span class="literal">false</span>);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>数据文件在本地写入的过程中会先写入tmp路径中，写完后通过硬链接link到shard目录，保证只要在shard目录中出现的数据文件都是完整写入的数据文件。</p>
+
+      
+    </div>
+    <footer class="article-footer">
+      <a data-url="http://example.com/2023/02/02/clickhouse%E5%86%99%E5%85%A5%E5%88%86%E5%B8%83%E5%BC%8F%E8%A1%A8%E6%B5%81%E7%A8%8B/" data-id="cldn0k8d30000a2mdgge3edzm" data-title="clickhouse写入分布式表流程" class="article-share-link">Share</a>
+      
+      
+      
+    </footer>
+  </div>
+  
+    
+<nav id="article-nav">
+  
+  
+    <a href="/2023/02/02/%E5%B7%A5%E5%85%B7%E6%95%99%E7%A8%8B/" id="article-nav-older" class="article-nav-link-wrap">
+      <strong class="article-nav-caption">Older</strong>
+      <div class="article-nav-title">工具教程</div>
+    </a>
+  
+</nav>
+
+  
+</article>
+
+
+</section>
+        
+          <aside id="sidebar">
+  
+    
+
+  
+    
+
+  
+    
+  
+    
+  <div class="widget-wrap">
+    <h3 class="widget-title">Archives</h3>
+    <div class="widget">
+      <ul class="archive-list"><li class="archive-list-item"><a class="archive-list-link" href="/archives/2023/02/">February 2023</a></li></ul>
+    </div>
+  </div>
+
+
+  
+    
+  <div class="widget-wrap">
+    <h3 class="widget-title">Recent Posts</h3>
+    <div class="widget">
+      <ul>
+        
+          <li>
+            <a href="/2023/02/02/clickhouse%E5%86%99%E5%85%A5%E5%88%86%E5%B8%83%E5%BC%8F%E8%A1%A8%E6%B5%81%E7%A8%8B/">clickhouse写入分布式表流程</a>
+          </li>
+        
+          <li>
+            <a href="/2023/02/02/%E5%B7%A5%E5%85%B7%E6%95%99%E7%A8%8B/">工具教程</a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+
+  
+</aside>
+        
+      </div>
+      <footer id="footer">
+  
+  <div class="outer">
+    <div id="footer-info" class="inner">
+      
+      &copy; 2023 John Doe<br>
+      Powered by <a href="https://hexo.io/" target="_blank">Hexo</a>
+    </div>
+  </div>
+</footer>
+
+    </div>
+    <nav id="mobile-nav">
+  
+    <a href="/" class="mobile-nav-link">Home</a>
+  
+    <a href="/archives" class="mobile-nav-link">Archives</a>
+  
+</nav>
+    
+
+
+<script src="/js/jquery-3.4.1.min.js"></script>
+
+
+
+  
+<script src="/fancybox/jquery.fancybox.min.js"></script>
+
+
+
+
+<script src="/js/script.js"></script>
+
+
+
+
+
+  </div>
+</body>
+</html>
